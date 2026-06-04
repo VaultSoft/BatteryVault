@@ -1,0 +1,19 @@
+# Build artifacts
+dist/
+build/
+*.spec.bak
+
+# Packaged release archive (published as a GitHub release asset, not tracked)
+*_Portable.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+desktop.ini
