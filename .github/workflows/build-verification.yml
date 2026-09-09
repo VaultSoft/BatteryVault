@@ -1,0 +1,51 @@
+name: Build Verification
+
+on:
+  push:
+    branches:
+      - main
+      - 'agent/**'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  windows-build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Run tests
+        run: python -B -m unittest discover -s tests -v
+
+      - name: Verify syntax
+        run: python -B -m py_compile batteryvault.py app_metadata.py build.py
+
+      - name: Build portable package
+        run: python -B build.py
+
+      - name: Verify packaged files
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist\BatteryVault\BatteryVault.exe")) { throw "Missing packaged executable" }
+          if (!(Test-Path "dist\BatteryVault_v$(Get-Content VERSION)_Portable.zip")) { throw "Missing portable ZIP" }
+          $rootDlls = Get-ChildItem "dist\BatteryVault" -Filter "*.dll" -File -ErrorAction SilentlyContinue
+          if ($rootDlls) { throw "Unexpected root-level DLL leakage: $($rootDlls.Name -join ', ')" }
+
+      - name: Upload portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: BatteryVault-portable
+          path: dist/BatteryVault_v*_Portable.zip
