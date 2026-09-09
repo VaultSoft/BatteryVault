@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
-"""BatteryVault v1.0.0 — Free Portable Windows Battery Health Monitor (VaultSoft)
+"""BatteryVault - Free Portable Windows Battery Health Monitor (VaultSoft)
 
 Reads battery health data via psutil + Windows WMI (root\\wmi battery classes).
 No admin rights required. Minimises to the system tray.
 """
 from __future__ import annotations
-import sys, os, platform
+import sys, os, platform, time, traceback
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 
 import psutil
+from app_metadata import APP_NAME, APP_VERSION, PUBLISHER
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QGridLayout, QSystemTrayIcon, QMenu,
     QSizePolicy, QFrame,
 )
-from PyQt6.QtCore import Qt, QTimer, QPoint, QRectF
+from PyQt6.QtCore import Qt, QTimer, QPoint, QRectF, qInstallMessageHandler
 from PyQt6.QtGui import (
     QColor, QPainter, QPen, QBrush, QFont, QIcon, QPixmap, QAction,
     QPainterPath,
 )
 
-APP_VERSION = "1.0.0"
-APP_NAME    = "BatteryVault"
-PUBLISHER   = "VaultSoft"
 REFRESH_MS  = 10_000   # refresh every 10 seconds
 
 _IS_WIN = platform.system() == "Windows"
@@ -107,7 +105,8 @@ class BatteryReader:
             import wmi
             self._wmi_cim = wmi.WMI()
             self._wmi_raw = wmi.WMI(namespace="root\\wmi")
-        except Exception:
+        except Exception as exc:
+            _write_runtime_note_once("wmi-init", f"WMI battery telemetry unavailable: {exc!r}")
             self._wmi_failed = True
             self._wmi_cim = None
             self._wmi_raw = None
@@ -117,7 +116,8 @@ class BatteryReader:
         """Query a root\\wmi class; returns [] on any failure (e.g. no battery)."""
         try:
             return self._wmi_raw.query(f"SELECT * FROM {cls}")
-        except Exception:
+        except Exception as exc:
+            _write_runtime_note_once(f"wmi-query-{cls}", f"WMI query failed for {cls}: {exc!r}")
             return []
 
     def read(self) -> BatteryData:
@@ -127,7 +127,8 @@ class BatteryReader:
         ps = None
         try:
             ps = psutil.sensors_battery()
-        except Exception:
+        except Exception as exc:
+            _write_runtime_note_once("psutil-battery", f"psutil battery telemetry unavailable: {exc!r}")
             ps = None
 
         if ps is not None:
@@ -489,7 +490,8 @@ class MainWindow(QMainWindow):
     def refresh(self):
         try:
             d = self._reader.read()
-        except Exception:
+        except Exception as exc:
+            _write_runtime_note_once("battery-read", f"Battery read failed: {exc!r}")
             d = BatteryData()
 
         if not d.has_battery:
@@ -605,9 +607,50 @@ QToolTip {{
 
 
 # ══════════════════════════════════════════════════════════════════
+# STARTUP / CRASH LOGGING
+# ══════════════════════════════════════════════════════════════════
+_APP_DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
+_CRASH_LOG = os.path.join(_APP_DATA_DIR, "crash.log")
+_RUNTIME_NOTES: set[str] = set()
+
+
+def _append_log(text: str) -> None:
+    try:
+        os.makedirs(_APP_DATA_DIR, exist_ok=True)
+        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+            f.write(text.rstrip() + "\n")
+    except Exception:
+        pass
+
+
+def _write_crash(exc_type, exc, tb) -> None:
+    _append_log(
+        f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Unhandled exception\n"
+        + "".join(traceback.format_exception(exc_type, exc, tb))
+    )
+
+
+def _write_runtime_note_once(key: str, message: str) -> None:
+    if key in _RUNTIME_NOTES:
+        return
+    _RUNTIME_NOTES.add(key)
+    _append_log(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}")
+
+
+def _qt_message_handler(mode, context, message) -> None:
+    mode_name = getattr(mode, "name", str(mode))
+    if "Critical" in mode_name or "Fatal" in mode_name:
+        _write_runtime_note_once(f"qt-{mode_name}-{message}", f"Qt {mode_name}: {message}")
+
+
+# ══════════════════════════════════════════════════════════════════
 # ENTRY POINT
 # ══════════════════════════════════════════════════════════════════
 def main():
+    sys.excepthook = _write_crash
+    qInstallMessageHandler(_qt_message_handler)
+    _append_log(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] STARTUP {APP_NAME} v{APP_VERSION}")
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
@@ -629,6 +672,16 @@ def main():
     win.move(geo.center() - win.rect().center())
     win.raise_(); win.activateWindow()
 
+    smoke_exit_ms = os.environ.get("BATTERYVAULT_SMOKE_EXIT_MS")
+    if smoke_exit_ms:
+        try:
+            QTimer.singleShot(max(0, int(smoke_exit_ms)), win._exit_app)
+        except ValueError:
+            _write_runtime_note_once(
+                "smoke-exit-invalid",
+                f"Ignoring invalid BATTERYVAULT_SMOKE_EXIT_MS={smoke_exit_ms!r}",
+            )
+
     # DWM rounded corners (Windows 11)
     if _IS_WIN:
         try:
@@ -638,8 +691,12 @@ def main():
         except Exception:
             pass
 
-    sys.exit(app.exec())
+    try:
+        return app.exec()
+    except Exception:
+        _write_crash(*sys.exc_info())
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
